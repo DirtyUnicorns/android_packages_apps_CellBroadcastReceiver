@@ -29,13 +29,19 @@ import android.os.Bundle;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.os.UserHandle;
+import android.os.SystemProperties;
 import android.preference.PreferenceManager;
 import android.provider.Telephony;
 import android.telephony.CellBroadcastMessage;
 import android.telephony.SmsCbCmasInfo;
+import android.telephony.SmsCbEtwsInfo;
 import android.telephony.SmsCbLocation;
 import android.telephony.SmsCbMessage;
+import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyManager;
 import android.util.Log;
+
+import com.android.internal.telephony.PhoneConstants;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -58,22 +64,39 @@ public class CellBroadcastAlertService extends Service {
     /** Sticky broadcast for latest area info broadcast received. */
     static final String CB_AREA_INFO_RECEIVED_ACTION =
             "android.cellbroadcastreceiver.CB_AREA_INFO_RECEIVED";
+    /** system property to enable/disable broadcast duplicate detecion.  */
+    private static final String CB_DUP_DETECTION = "persist.cb.dup_detection";
+
+    /** Check for system property to enable/disable duplicate detection.  */
+    static boolean mUseDupDetection = SystemProperties.getBoolean(CB_DUP_DETECTION, true);
+
+    /** Channel 50 Cell Broadcast. */
+    static final int CB_CHANNEL_50 = 50;
+
+    /** Channel 60 Cell Broadcast. */
+    static final int CB_CHANNEL_60 = 60;
 
     /** Container for message ID and geographical scope, for duplicate message detection. */
     private static final class MessageServiceCategoryAndScope {
         private final int mServiceCategory;
         private final int mSerialNumber;
         private final SmsCbLocation mLocation;
+        private final SmsCbEtwsInfo mEtwsWarningInfo;
 
         MessageServiceCategoryAndScope(int serviceCategory, int serialNumber,
-                SmsCbLocation location) {
+                SmsCbLocation location, SmsCbEtwsInfo etwsWarningInfo) {
             mServiceCategory = serviceCategory;
             mSerialNumber = serialNumber;
             mLocation = location;
+            mEtwsWarningInfo = etwsWarningInfo;
         }
 
         @Override
         public int hashCode() {
+            if (mEtwsWarningInfo != null) {
+                return mEtwsWarningInfo.hashCode() + mLocation.hashCode() + 5 * mServiceCategory
+                        + 7 * mSerialNumber;
+            }
             return mLocation.hashCode() + 5 * mServiceCategory + 7 * mSerialNumber;
         }
 
@@ -84,6 +107,14 @@ public class CellBroadcastAlertService extends Service {
             }
             if (o instanceof MessageServiceCategoryAndScope) {
                 MessageServiceCategoryAndScope other = (MessageServiceCategoryAndScope) o;
+                if (mEtwsWarningInfo == null && other.mEtwsWarningInfo != null) {
+                    return false;
+                } else if (mEtwsWarningInfo != null && other.mEtwsWarningInfo == null) {
+                    return false;
+                } else if (mEtwsWarningInfo != null && other.mEtwsWarningInfo != null
+                        && !mEtwsWarningInfo.equals(other.mEtwsWarningInfo)) {
+                    return false;
+                }
                 return (mServiceCategory == other.mServiceCategory &&
                         mSerialNumber == other.mSerialNumber &&
                         mLocation.equals(other.mLocation));
@@ -93,8 +124,9 @@ public class CellBroadcastAlertService extends Service {
 
         @Override
         public String toString() {
-            return "{mServiceCategory: " + mServiceCategory + " serial number: " + mSerialNumber +
-                    " location: " + mLocation.toString() + '}';
+            return "{mServiceCategory: " + mServiceCategory + " serial number: " + mSerialNumber
+                    + " location: " + mLocation.toString() + " mEtwsWarningInfo: "
+                    + (mEtwsWarningInfo == null ? "NULL" : mEtwsWarningInfo.toString()) + '}';
         }
     }
 
@@ -150,37 +182,45 @@ public class CellBroadcastAlertService extends Service {
         }
 
         final CellBroadcastMessage cbm = new CellBroadcastMessage(message);
+        int defaultSubId = SubscriptionManager.getDefaultSmsSubId();
+        int phoneId = intent.getIntExtra(PhoneConstants.PHONE_KEY,
+                SubscriptionManager.getPhoneId(defaultSubId));
+        int [] subId = SubscriptionManager.getSubId(phoneId);
+        cbm.setSubId(subId[0]);
         if (!isMessageEnabledByUser(cbm)) {
             Log.d(TAG, "ignoring alert of type " + cbm.getServiceCategory() +
                     " by user preference");
             return;
         }
 
-        // Check for duplicate message IDs according to CMAS carrier requirements. Message IDs
-        // are stored in volatile memory. If the maximum of 65535 messages is reached, the
-        // message ID of the oldest message is deleted from the list.
-        MessageServiceCategoryAndScope newCmasId = new MessageServiceCategoryAndScope(
-                message.getServiceCategory(), message.getSerialNumber(), message.getLocation());
+        if (mUseDupDetection) {
+            // Check for duplicate message IDs according to CMAS carrier requirements. Message IDs
+            // are stored in volatile memory. If the maximum of 65535 messages is reached, the
+            // message ID of the oldest message is deleted from the list.
+            MessageServiceCategoryAndScope newCmasId = new MessageServiceCategoryAndScope(
+                    message.getServiceCategory(), message.getSerialNumber(), message.getLocation(), message.getEtwsWarningInfo());
+            Log.v(TAG,"newCmasId:" + newCmasId + " hash: " + newCmasId.hashCode());
 
-        // Add the new message ID to the list. It's okay if this is a duplicate message ID,
-        // because the list is only used for removing old message IDs from the hash set.
-        if (sCmasIdList.size() < MAX_MESSAGE_ID_SIZE) {
-            sCmasIdList.add(newCmasId);
-        } else {
-            // Get oldest message ID from the list and replace with the new message ID.
-            MessageServiceCategoryAndScope oldestCmasId = sCmasIdList.get(sCmasIdListIndex);
-            sCmasIdList.set(sCmasIdListIndex, newCmasId);
-            Log.d(TAG, "message ID limit reached, removing oldest message ID " + oldestCmasId);
-            // Remove oldest message ID from the set.
-            sCmasIdSet.remove(oldestCmasId);
-            if (++sCmasIdListIndex >= MAX_MESSAGE_ID_SIZE) {
-                sCmasIdListIndex = 0;
+            // Add the new message ID to the list. It's okay if this is a duplicate message ID,
+            // because the list is only used for removing old message IDs from the hash set.
+            if (sCmasIdList.size() < MAX_MESSAGE_ID_SIZE) {
+                sCmasIdList.add(newCmasId);
+            } else {
+                // Get oldest message ID from the list and replace with the new message ID.
+                MessageServiceCategoryAndScope oldestCmasId = sCmasIdList.get(sCmasIdListIndex);
+                sCmasIdList.set(sCmasIdListIndex, newCmasId);
+                Log.d(TAG, "message ID limit reached, removing oldest message ID " + oldestCmasId);
+                // Remove oldest message ID from the set.
+                sCmasIdSet.remove(oldestCmasId);
+                if (++sCmasIdListIndex >= MAX_MESSAGE_ID_SIZE) {
+                    sCmasIdListIndex = 0;
+                }
             }
-        }
-        // Set.add() returns false if message ID has already been added
-        if (!sCmasIdSet.add(newCmasId)) {
-            Log.d(TAG, "ignoring duplicate alert with " + newCmasId);
-            return;
+            // Set.add() returns false if message ID has already been added
+            if (!sCmasIdSet.add(newCmasId)) {
+                Log.d(TAG, "ignoring duplicate alert with " + newCmasId);
+                return;
+            }
         }
 
         final Intent alertIntent = new Intent(SHOW_NEW_ALERT_ACTION);
@@ -239,6 +279,7 @@ public class CellBroadcastAlertService extends Service {
      * @return true if the user has enabled this message type; false otherwise
      */
     private boolean isMessageEnabledByUser(CellBroadcastMessage message) {
+        int serviceCategory = message.getServiceCategory();
         if (message.isEtwsTestMessage()) {
             return PreferenceManager.getDefaultSharedPreferences(this)
                     .getBoolean(CellBroadcastSettings.KEY_ENABLE_ETWS_TEST_ALERTS, false);
@@ -269,14 +310,40 @@ public class CellBroadcastAlertService extends Service {
             }
         }
 
-        if (message.getServiceCategory() == 50) {
-            // save latest area info broadcast for Settings display and send as broadcast
-            CellBroadcastReceiverApp.setLatestAreaInfo(message);
+        if (serviceCategory == CB_CHANNEL_50 || serviceCategory == CB_CHANNEL_60) {
+            if (serviceCategory == CB_CHANNEL_50) {
+                // save latest area info on channel 50 for Settings display
+                CellBroadcastReceiverApp.setLatestAreaInfo(message);
+            }
+            // send broadcasts for channel 50 and 60
             Intent intent = new Intent(CB_AREA_INFO_RECEIVED_ACTION);
             intent.putExtra("message", message);
             sendBroadcastAsUser(intent, UserHandle.ALL,
                     android.Manifest.permission.READ_PHONE_STATE);
-            return false;   // area info broadcasts are displayed in Settings status screen
+
+            boolean isMSim = TelephonyManager.getDefault().isMultiSimEnabled();
+            String country = "";
+            if (isMSim) {
+                country = TelephonyManager.getDefault().getSimCountryIso(message.getSubId());
+            } else {
+                country = TelephonyManager.getDefault().getSimCountryIso();
+            }
+            // In Brazil(50)/India(50/60) the area info broadcasts are displayed in Settings,
+            // CBwidget or Mms.
+            // But in other country it should be displayed as a normal CB alert.
+            boolean needIgnore = "in".equals(country)
+                    || ("br".equals(country) && (message.getServiceCategory() == CB_CHANNEL_50));
+            return !needIgnore;
+        }
+
+        if (message.getServiceCategory() == 60) {
+            if(getResources().getBoolean(R.bool.show_india_settings)) {
+                return PreferenceManager.getDefaultSharedPreferences(this).getBoolean(
+                        CellBroadcastSettings.KEY_ENABLE_CHANNEL_60_ALERTS,
+                        getResources().getBoolean(R.bool.def_channel_60_enabled));
+            }else {
+                return true;
+            }
         }
 
         return true;    // other broadcast messages are always enabled

@@ -25,12 +25,14 @@ import android.os.SystemProperties;
 import android.preference.PreferenceManager;
 import android.telephony.CellBroadcastMessage;
 import android.telephony.SmsManager;
+import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Log;
 
 import com.android.internal.telephony.cdma.sms.SmsEnvelope;
 import com.android.internal.telephony.gsm.SmsCbConstants;
+import com.android.internal.telephony.PhoneConstants;
 
 import static com.android.cellbroadcastreceiver.CellBroadcastReceiver.DBG;
 
@@ -57,7 +59,8 @@ public class CellBroadcastConfigService extends IntentService {
         super(TAG);          // use class name for worker thread name
     }
 
-    private static void setChannelRange(SmsManager manager, String ranges, boolean enable) {
+    private static void setChannelRange(SmsManager manager, String ranges, boolean enable,
+            int subId) {
         if (DBG)log("setChannelRange: " + ranges);
 
         try {
@@ -112,7 +115,7 @@ public class CellBroadcastConfigService extends IntentService {
         }
 
         // Check for system property defining the emergency channel ranges to enable
-        String emergencyIdRange = (CellBroadcastReceiver.phoneIsCdma()) ?
+        String emergencyIdRange = (CellBroadcastReceiver.phoneIsCdma(message.getSubId())) ?
                 "" : SystemProperties.get(EMERGENCY_BROADCAST_RANGE_GSM);
 
         if (TextUtils.isEmpty(emergencyIdRange)) {
@@ -144,6 +147,9 @@ public class CellBroadcastConfigService extends IntentService {
     @Override
     protected void onHandleIntent(Intent intent) {
         if (ACTION_ENABLE_CHANNELS.equals(intent.getAction())) {
+            int phoneId = intent.getIntExtra(PhoneConstants.SLOT_KEY,
+                 SubscriptionManager.getPhoneId(SubscriptionManager.getDefaultSmsSubId()));
+            int[] subId = SubscriptionManager.getSubId(phoneId);
             try {
                 SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
                 Resources res = getResources();
@@ -153,32 +159,43 @@ public class CellBroadcastConfigService extends IntentService {
                 // except for cmas presidential. i.e. to receive cmas severe alerts, both
                 // enableEmergencyAlerts AND enableCmasSevereAlerts must be true.
                 boolean enableEmergencyAlerts = prefs.getBoolean(
-                        CellBroadcastSettings.KEY_ENABLE_EMERGENCY_ALERTS, true);
+                        CellBroadcastSettings.KEY_ENABLE_EMERGENCY_ALERTS + phoneId, true);
 
                 TelephonyManager tm = (TelephonyManager) getSystemService(
                         Context.TELEPHONY_SERVICE);
+                String country = tm.getSimCountryIso(subId[0]);
+                boolean enableChannel50Support = res.getBoolean(R.bool.show_brazil_settings)
+                        || "br".equals(country) || res.getBoolean(R.bool.show_india_settings)
+                        || "in".equals(country);
 
-                boolean enableChannel50Support = res.getBoolean(R.bool.show_brazil_settings) ||
-                        "br".equals(tm.getSimCountryIso());
+                boolean enableChannel60Support = res.getBoolean(R.bool.show_india_settings)
+                        || "in".equals(tm.getSimCountryIso());
 
                 boolean enableChannel50Alerts = enableChannel50Support &&
-                        prefs.getBoolean(CellBroadcastSettings.KEY_ENABLE_CHANNEL_50_ALERTS, true);
+                        prefs.getBoolean(CellBroadcastSettings.KEY_ENABLE_CHANNEL_50_ALERTS
+                        + phoneId, true);
+
+                boolean enableChannel60Alerts = enableChannel60Support &&
+                        prefs.getBoolean(CellBroadcastSettings.KEY_ENABLE_CHANNEL_60_ALERTS
+                        + phoneId, getResources().getBoolean(R.bool.def_channel_60_enabled));
 
                 // Note:  ETWS is for 3GPP only
                 boolean enableEtwsTestAlerts = prefs.getBoolean(
-                        CellBroadcastSettings.KEY_ENABLE_ETWS_TEST_ALERTS, false);
+                        CellBroadcastSettings.KEY_ENABLE_ETWS_TEST_ALERTS + phoneId, false);
 
                 boolean enableCmasExtremeAlerts = prefs.getBoolean(
-                        CellBroadcastSettings.KEY_ENABLE_CMAS_EXTREME_THREAT_ALERTS, true);
+                        CellBroadcastSettings.KEY_ENABLE_CMAS_EXTREME_THREAT_ALERTS
+                        + phoneId, true);
 
                 boolean enableCmasSevereAlerts = prefs.getBoolean(
-                        CellBroadcastSettings.KEY_ENABLE_CMAS_SEVERE_THREAT_ALERTS, true);
+                        CellBroadcastSettings.KEY_ENABLE_CMAS_SEVERE_THREAT_ALERTS
+                        + phoneId, true);
 
                 boolean enableCmasAmberAlerts = prefs.getBoolean(
-                        CellBroadcastSettings.KEY_ENABLE_CMAS_AMBER_ALERTS, true);
+                        CellBroadcastSettings.KEY_ENABLE_CMAS_AMBER_ALERTS + phoneId, true);
 
                 boolean enableCmasTestAlerts = prefs.getBoolean(
-                        CellBroadcastSettings.KEY_ENABLE_CMAS_TEST_ALERTS, false);
+                        CellBroadcastSettings.KEY_ENABLE_CMAS_TEST_ALERTS + phoneId, false);
 
                 // set up broadcast ID ranges to be used for each category
                 int cmasExtremeStart =
@@ -194,16 +211,16 @@ public class CellBroadcastConfigService extends IntentService {
                 int cmasTaiwanPWS = SmsCbConstants.MESSAGE_ID_CMAS_ALERT_PRESIDENTIAL_LEVEL_LANGUAGE;
 
                 // set to CDMA broadcast ID rage if phone is in CDMA mode.
-                boolean isCdma = CellBroadcastReceiver.phoneIsCdma();
+                boolean isCdma = CellBroadcastReceiver.phoneIsCdma(subId[0]);
 
-                SmsManager manager = SmsManager.getDefault();
+                SmsManager manager = SmsManager.getSmsManagerForSubscriptionId(subId[0]);
                 // Check for system property defining the emergency channel ranges to enable
                 String emergencyIdRange = isCdma ?
                         "" : SystemProperties.get(EMERGENCY_BROADCAST_RANGE_GSM);
                 if (enableEmergencyAlerts) {
                     if (DBG) log("enabling emergency cell broadcast channels");
                     if (!TextUtils.isEmpty(emergencyIdRange)) {
-                        setChannelRange(manager, emergencyIdRange, true);
+                        setChannelRange(manager, emergencyIdRange, true, subId[0]);
                     } else {
                         // No emergency channel system property, enable all emergency channels
                         // that have checkbox checked
@@ -265,7 +282,7 @@ public class CellBroadcastConfigService extends IntentService {
                     // we may have enabled these channels previously, so try to disable them
                     if (DBG) log("disabling emergency cell broadcast channels");
                     if (!TextUtils.isEmpty(emergencyIdRange)) {
-                        setChannelRange(manager, emergencyIdRange, false);
+                        setChannelRange(manager, emergencyIdRange, false, subId[0]);
                     } else {
                         // No emergency channel system property, disable all emergency channels
                         // except for CMAS Presidential (See 3GPP TS 22.268 Section 6.2)
@@ -320,6 +337,19 @@ public class CellBroadcastConfigService extends IntentService {
                 } else {
                     if (DBG) log("disabling cell broadcast channel 50");
                     manager.disableCellBroadcast(50, SmsManager.CELL_BROADCAST_RAN_TYPE_GSM);
+                }
+
+                // Enable Channel 60 for India
+                if (isCdma) {
+                    if (DBG) log("channel 60 is not applicable for cdma");
+                } else if (enableChannel60Alerts) {
+                    if (DBG) log("enabling cell broadcast channel 60");
+                    manager.enableCellBroadcast(60, SmsManager.CELL_BROADCAST_RAN_TYPE_GSM);
+                    if (DBG) log("enabled cell broadcast channel 60");
+                } else {
+                    if (DBG) log("disabling cell broadcast channel 60");
+                    manager.disableCellBroadcast(60, SmsManager.CELL_BROADCAST_RAN_TYPE_GSM);
+                    if (DBG) log("disabled cell broadcast channel 60");
                 }
 
                 if ("il".equals(tm.getSimCountryIso()) || "il".equals(tm.getNetworkCountryIso())) {

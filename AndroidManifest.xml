@@ -32,7 +32,8 @@
 
     <application android:name="CellBroadcastReceiverApp"
             android:label="@string/app_label"
-            android:icon="@mipmap/ic_launcher_cell_broadcast">
+            android:icon="@mipmap/ic_launcher_cell_broadcast"
+            android:supportsRtl="true">
 
         <service android:name="CellBroadcastAlertAudio"
                  android:exported="false" />
@@ -75,7 +76,8 @@
                   android:theme="@style/CellBroadcastSettingsTheme"
                   android:label="@string/sms_cb_settings"
                   android:launchMode="singleTask"
-                  android:exported="true" />
+                  android:exported="true"
+                  android:configChanges="orientation|screenSize|fontScale|locale|layoutDirection" />
 
         <activity android:name="CellBroadcastAlertDialog"
                   android:theme="@android:style/Theme.Material.Light.Dialog"
@@ -122,6 +124,10 @@
         <receiver android:name="CellBroadcastReceiver">
             <intent-filter>
                  <action android:name="android.intent.action.SERVICE_STATE" />
+            </intent-filter>
+
+            <intent-filter>
+                 <action android:name="android.intent.action.ACTION_SUBINFO_RECORD_UPDATED" />
             </intent-filter>
 
             <intent-filter>
