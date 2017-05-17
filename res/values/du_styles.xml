@@ -15,7 +15,7 @@
      limitations under the License.
 -->
 <resources>
-    <style name="CellBroadcastListActivityTheme" parent="@android:style/Theme.DeviceDefault.Light" />
+    <style name="CellBroadcastListActivityTheme" parent="android:Theme.DeviceDefault.Settings" />
 
     <style name="CellBroadcastAlertDialog" parent="@android:style/Theme.DeviceDefault.Light.Dialog" />
 </resources>
